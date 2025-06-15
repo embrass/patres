@@ -1,9 +1,10 @@
 from passlib.context import CryptContext
-from datetime import datetime, timedelta
-
-from pydantic import EmailStr
-from app.librarian.dao import RegLibrarian
 from jose import jwt
+from datetime import datetime, timedelta
+from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.librarian.models import Librarian
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -20,8 +21,14 @@ def create_access_token(data: dict):
         to_encode, "weqdhygQUOYDQWDJocpdewkqodODkdq21", "HS256"
     )
     return encoded_jwt
-async def authenticate_liberian(email: EmailStr, password: str):
-    user = await RegLibrarian.find_one_or_none(email=email)
-    if not user and not verify_password(password, user.password):
+
+async def authenticate_liberian(email: str, password: str, db: AsyncSession) -> Optional[Librarian]:
+    result = await db.execute(
+        select(Librarian).where(Librarian.email == email)
+    )
+    liberian = result.scalar_one_or_none()
+    if not liberian or not pwd_context.verify(password, liberian.password):
         return None
-    return user
+    return liberian
+
+

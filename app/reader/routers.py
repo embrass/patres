@@ -1,32 +1,116 @@
-"""from fastapi import APIRouter, HTTPException, status, Response
-from app.librarian.auth import get_password_hash
-from app.reader.dao import ReaderDAO
-from app.reader.schemas import SUserReg
-from app.librarian.auth import authenticate_user
-from app.librarian.auth import create_access_token
+from sqlalchemy import select, update, func
+from fastapi import Depends, HTTPException, APIRouter
+
+from app.dependensis.depends import get_current_user, get_db
+from app.reader.schemas import ReaderResponse, ReaderCreate
+from app.reader.models import Reader
+from app.book.schemas import BookResponse
+from app.book.models import Book
+from app.borrow.models import Borrow
+from app.borrow.schemas import BorrowBookRequest, ReturnBookRequest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(
     prefix="/reader",
-    tags=["Auth&User"]
+    tags=["Readers"]
 )
 
 
-@router.post("/register")
-async def register_user(user_data: SUserReg):
-    existing_user = await ReaderDAO.find_one_or_none(email=user_data.email)
-    if existing_user:
-        raise HTTPException(status_code=401)
-    hashed_password = get_password_hash(user_data.password)
-    await ReaderDAO.insert_data(email=user_data.email, hashed_password=hashed_password)
+
+@router.post("/create/", response_model=ReaderResponse)
+async def create_reader(reader: ReaderCreate, db: AsyncSession = Depends(get_db)):
+    try:
+        db_reader = Reader(**reader.dict())
+        db.add(db_reader)
+        await db.commit()
+        await db.refresh(db_reader)
+        return db_reader
+    except:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Email already exists")
 
 
-@router.post("/login")
-async def login_user(response: Response, user_data: SUserReg):
-    user = await authenticate_user(user_data.email, user_data.password)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    access_token = create_access_token({"sub": user.id})
-    response.set_cookie("access_token", access_token)
-    return {"access_token": access_token}
+@router.get("/readers/", response_model=list[ReaderResponse])
+async def get_readers(db: AsyncSession = Depends(get_db), _: dict = Depends(get_current_user)):
+    result = await db.execute(select(Reader))
+    return result.scalars().all()
 
-"""
+
+@router.get("/books/", response_model=list[BookResponse])
+async def get_books(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Book))
+    return result.scalars().all()
+
+
+
+@router.post("/borrow/")
+async def borrow_book(borrow: BorrowBookRequest, db: AsyncSession = Depends(get_db),
+                      _: dict = Depends(get_current_user)):
+    # Проверка доступности книги
+    book = (await db.execute(select(Book).where(Book.id == borrow.book_id))).scalar_one_or_none()
+    if not book or book.available_copies <= 0:
+        raise HTTPException(status_code=400, detail="Book not available")
+
+
+    borrowed_count = (await db.execute(
+        select(func.count()).where(
+            Borrow.reader_id == borrow.reader_id,
+            Borrow.return_date.is_(None)
+        )
+    )).scalar()
+    if borrowed_count >= 3:
+        raise HTTPException(status_code=400, detail="Reader has reached the limit (3 books)")
+
+
+    borrowed_book = Borrow(**borrow.dict())
+    db.add(borrowed_book)
+    await db.execute(
+        update(Book)
+        .where(Book.id == borrow.book_id)
+        .values(available_copies=Book.available_copies - 1)
+    )
+    await db.commit()
+    return {"message": "Book borrowed successfully"}
+
+
+# ===== Возврат книги =====
+@router.post("/return/")
+async def return_book(return_req: ReturnBookRequest, db: AsyncSession = Depends(get_db),
+                      _: dict = Depends(get_current_user)):
+    # Получаем запись о выдаче
+    borrowed = (await db.execute(
+        select(Borrow)
+        .where(Borrow.id == return_req.borrow_id)
+    )).scalar_one_or_none()
+
+    if not borrowed or borrowed.return_date is not None:
+        raise HTTPException(status_code=400, detail="Invalid borrow record")
+
+
+    borrowed.return_date = func.now()
+    await db.execute(
+        update(Book)
+        .where(Book.id == borrowed.book_id)
+        .values(available_copies=Book.available_copies + 1)
+    )
+    await db.commit()
+    return {"message": "Book returned successfully"}
+
+
+@router.get("/reader-books/{reader_id}", response_model=list[BookResponse])
+async def get_reader_books(reader_id: int, db: AsyncSession = Depends(get_db), _: dict = Depends(get_current_user)):
+
+    borrowed_books = (await db.execute(
+        select(Borrow.book_id)
+        .where(
+            Borrow.reader_id == reader_id,
+            Borrow.return_date.is_(None)
+        )
+    )).scalars().all()
+
+    if borrowed_books:
+        result = await db.execute(select(Book).where(Book.id.in_(borrowed_books)))
+        return result.scalars().all()
+    return []
+
+

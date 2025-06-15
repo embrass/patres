@@ -1,16 +1,17 @@
-from fastapi import APIRouter, HTTPException, status, Response
 from app.librarian.auth import get_password_hash
-
-#from app.reader.schemas import SUserReg
+from fastapi import APIRouter, HTTPException, status, Response
 from app.librarian.schemas import LibrarianCreate
-from app.librarian.auth import authenticate_liberian
-from app.librarian.auth import create_access_token
+from app.librarian.auth import authenticate_liberian, create_access_token, verify_password
 from app.librarian.dao import RegLibrarian
-router = APIRouter(
-    prefix="/auth",
-    tags=["Auth&User"]
-)
 
+from app.dependensis.depends import Depends, get_db
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.ext.asyncio import AsyncSession
+
+router = APIRouter(
+
+    tags=["Auth&Lib"]
+)
 
 @router.post("/register")
 async def register_liberian(user_data: LibrarianCreate):
@@ -20,13 +21,23 @@ async def register_liberian(user_data: LibrarianCreate):
     hashed_password = get_password_hash(user_data.password)
     await RegLibrarian.insert_data(email=user_data.email, hashed_password=hashed_password)
 
+@router.post("/token")
+async def login_liberian(
+        form_data: OAuth2PasswordRequestForm = Depends(),
+        db: AsyncSession = Depends(get_db)
+):
+    liberian = await authenticate_liberian(
+        email=form_data.username,
+        password=form_data.password,
+        db=db
+    )
 
-@router.post("/login")
-async def login_liberian(response: Response, user_data: LibrarianCreate):
-    liberian = await authenticate_liberian(user_data.email, user_data.password)
     if not liberian:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+        )
+
     access_token = create_access_token({"sub": liberian.id})
-    response.set_cookie("access_token", access_token)
-    return {"access_token": access_token}
+    return {"access_token": access_token, "token_type": "bearer"}
 
